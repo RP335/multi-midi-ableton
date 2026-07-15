@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ableton Multi-Track MIDI Exporter</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen flex flex-col items-center justify-center p-6">
+
+    <div class="w-full max-w-2xl bg-slate-800 rounded-2xl shadow-xl border border-slate-700 p-8">
+        <h1 class="text-3xl font-bold tracking-tight text-indigo-400 mb-2">ALS Multi-Channel MIDI Extractor</h1>
+        <p class="text-slate-400 mb-6 text-sm">Convert your Ableton Live Set into a single Standard MIDI File (Format 1) containing all tracks independently.</p>
+
+        <div id="drop-zone" class="border-2 border-dashed border-slate-600 rounded-xl p-8 flex flex-col items-center justify-center cursor-pointer hover:border-indigo-500 hover:bg-slate-750 transition-all group">
+            <svg class="w-12 h-12 text-slate-500 group-hover:text-indigo-400 mb-4 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/></svg>
+            <p class="text-base font-medium">Drag & drop your <span class="text-indigo-400">.als</span> project file here</p>
+            <p class="text-xs text-slate-500 mt-1">Or click to browse files</p>
+            <input type="file" id="file-input" accept=".als" class="hidden">
+        </div>
+
+        <div id="status" class="mt-6 text-sm text-amber-400 hidden"></div>
+        
+        <div id="track-container" class="mt-6 space-y-3 hidden">
+            <h3 class="text-md font-semibold text-slate-300">Detected MIDI Tracks:</h3>
+            <div id="track-list" class="space-y-2 max-h-60 overflow-y-auto pr-2"></div>
+            
+            <button id="export-btn" class="w-full mt-4 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold py-3 px-4 rounded-xl shadow-lg shadow-indigo-600/20 transition-all flex items-center justify-center gap-2">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v1a3 3 0 00-3-3H7a3 3 0 00-3 3zM12 14a3 3 0 01-3-3V4a3 3 0 116 0v7a3 3 0 01-3 3z"/></svg>
+                Export Consolidated SMF1 MIDI File
+            </button>
+        </div>
+    </div>
+
+    <script>
+        const dropZone = document.getElementById('drop-zone');
+        const fileInput = document.getElementById('file-input');
+        const statusDiv = document.getElementById('status');
+        const trackContainer = document.getElementById('track-container');
+        const trackList = document.getElementById('track-list');
+        const exportBtn = document.getElementById('export-btn');
+
+        let parsedTracksData = [];
+
+        // UI Event Listeners
+        dropZone.addEventListener('click', () => fileInput.click());
+        dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('border-indigo-500', 'bg-slate-750'); });
+        dropZone.addEventListener('dragleave', () => { dropZone.classList.remove('border-indigo-500', 'bg-slate-750'); });
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('border-indigo-500', 'bg-slate-750');
+            if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+        });
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length) handleFile(e.target.files[0]);
+        });
+
+        function showStatus(msg, isError = false) {
+            statusDiv.textContent = msg;
+            statusDiv.className = `mt-6 text-sm font-medium ${isError ? 'text-rose-400' : 'text-amber-400'}`;
+            statusDiv.classList.remove('hidden');
+        }
+
+        // Processing Logic
+        function handleFile(file) {
+            showStatus("Decompressing Ableton project file...");
+            trackContainer.classList.add('hidden');
+            
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const compressed = new Uint8Array(e.target.result);
+                    // Inflate the gzipped .als file into raw XML text
+                    const xmlText = pako.ungzip(compressed, { to: 'string' });
+                    
+                    showStatus("Parsing XML structure...");
+                    parseAbletonXML(xmlText);
+                } catch (err) {
+                    console.error(err);
+                    showStatus("Error processing file. Make sure it's a valid, saved .als file.", true);
+                }
+            };
+            reader.readAsArrayBuffer(file);
+        }
+
+function parseAbletonXML(xmlString) {
+            const parser = new DOMParser();
+            const xmlDoc = parser.parseFromString(xmlString, "text/xml");
+            
+            const midiTracks = xmlDoc.getElementsByTagName("MidiTrack");
+            parsedTracksData = [];
+            trackList.innerHTML = '';
+
+            if (midiTracks.length === 0) {
+                showStatus("No MIDI tracks found in this Ableton Set.", true);
+                return;
+            }
+
+            Array.from(midiTracks).forEach((track, index) => {
+                const nameNode = track.querySelector("Name > EffectiveName");
+                const trackName = nameNode ? nameNode.getAttribute("Value") : `Track ${index + 1}`;
+                const notes = [];
+
+                // 1. Only grab clips from the Arrangement timeline
+                const mainSequencer = track.querySelector("MainSequencer");
+                if (!mainSequencer) return;
+
+                const clips = mainSequencer.getElementsByTagName("MidiClip");
+
+                Array.from(clips).forEach(clip => {
+                    // Find global start and local trim offsets
+                    const timeNode = clip.querySelector("Time");
+                    const startNode = clip.querySelector("CurrentStart");
+                    const endNode = clip.querySelector("CurrentEnd");
+
+                    const globalClipStart = timeNode ? parseFloat(timeNode.getAttribute("Value")) : 0;
+                    const trimStart = startNode ? parseFloat(startNode.getAttribute("Value")) : 0;
+                    const trimEnd = endNode ? parseFloat(endNode.getAttribute("Value")) : 999999;
+
+                    // 2. Extract pitch from the parent KeyTrack folder
+                    const keyTracks = clip.getElementsByTagName("KeyTrack");
+                    
+                    Array.from(keyTracks).forEach(keyTrack => {
+                        const midiKeyNode = keyTrack.querySelector("MidiKey");
+                        const pitch = midiKeyNode ? parseInt(midiKeyNode.getAttribute("Value")) : 60;
+
+                        const noteEvents = keyTrack.getElementsByTagName("MidiNoteEvent");
+                        
+                        Array.from(noteEvents).forEach(event => {
+                            const localTime = parseFloat(event.getAttribute("Time"));
+                            const duration = parseFloat(event.getAttribute("Duration"));
+                            const velocity = parseInt(event.getAttribute("Velocity")) || 100;
+
+                            // 3. Skip notes that were trimmed out of the clip's boundaries
+                            if (localTime + duration <= trimStart || localTime >= trimEnd) {
+                                return; 
+                            }
+
+                            // Calculate exact timeline placement
+                            const absoluteTime = globalClipStart + (localTime - trimStart);
+
+                            if (!isNaN(absoluteTime) && !isNaN(duration)) {
+                                notes.push({
+                                    pitch: pitch,
+                                    time: absoluteTime,
+                                    duration: duration,
+                                    velocity: velocity
+                                });
+                            }
+                        });
+                    });
+                });
+
+                if (notes.length > 0) {
+                    parsedTracksData.push({ name: trackName, notes: notes });
+                    
+                    const div = document.createElement('div');
+                    div.className = "flex items-center justify-between bg-slate-700/50 p-3 rounded-lg border border-slate-600";
+                    div.innerHTML = `
+                        <span class="font-medium text-slate-200">${trackName}</span>
+                        <span class="text-xs bg-indigo-500/20 text-indigo-300 px-2 py-1 rounded-md border border-indigo-500/30">${notes.length} notes</span>
+                    `;
+                    trackList.appendChild(div);
+                }
+            });
+
+            if (parsedTracksData.length === 0) {
+                showStatus("Tracks found, but no arrangement notes detected.", true);
+            } else {
+                statusDiv.classList.add('hidden');
+                trackContainer.classList.remove('hidden');
+            }
+        }
+
+// Build SMF Format 1 binary blob natively
+        exportBtn.addEventListener('click', () => {
+            const PPQ = 96; // Pulses Per Quarter note
+            let bytes = [];
+
+            // Helper to push numbers as variable-length quantities (VLQ) for MIDI timing
+            function writeVarLength(value, arrayTarget) {
+                let buffer = value & 0x7F;
+                while ((value >>= 7) > 0) {
+                    buffer <<= 8;
+                    buffer |= 0x80 | (value & 0x7F);
+                }
+                while (true) {
+                    arrayTarget.push(buffer & 0xFF);
+                    if (buffer & 0x80) buffer >>= 8;
+                    else break;
+                }
+            }
+
+            // 1. Header Chunk (MThd)
+            bytes.push(0x4D, 0x54, 0x68, 0x64); // "MThd"
+            bytes.push(0x00, 0x00, 0x00, 0x06); // Header size always 6
+            bytes.push(0x00, 0x01);             // Format Type 1 (Multiple structural tracks)
+            
+            const totalTracks = parsedTracksData.length;
+            bytes.push((totalTracks >> 8) & 0xFF, totalTracks & 0xFF); // Dynamic track count
+            bytes.push((PPQ >> 8) & 0xFF, PPQ & 0xFF);                 // Time division (96 PPQ)
+
+            // 2. Track Chunks (MTrk)
+            parsedTracksData.forEach((trackData) => {
+                let trackBytes = [];
+
+                // Track Name Meta Event
+                trackBytes.push(0x00, 0xFF, 0x03);
+                writeVarLength(trackData.name.length, trackBytes);
+                for (let i = 0; i < trackData.name.length; i++) {
+                    trackBytes.push(trackData.name.charCodeAt(i));
+                }
+
+                // Flatten notes into distinct absolute events
+                let absoluteEvents = [];
+                trackData.notes.forEach(note => {
+                    const startTick = Math.round(note.time * PPQ);
+                    const endTick = Math.round((note.time + note.duration) * PPQ);
+                    
+                    absoluteEvents.push({ tick: startTick, type: 0x90, pitch: note.pitch, vel: note.velocity });
+                    absoluteEvents.push({ tick: endTick, type: 0x80, pitch: note.pitch, vel: 0 });
+                });
+
+                // Sort chronological sequence
+                absoluteEvents.sort((a, b) => a.tick - b.tick);
+
+                // Write sequence using delta times
+                let lastTick = 0;
+                absoluteEvents.forEach(ev => {
+                    let delta = ev.tick - lastTick;
+                    if (delta < 0) delta = 0;
+                    
+                    writeVarLength(delta, trackBytes);
+                    trackBytes.push(ev.type, ev.pitch, ev.vel);
+                    lastTick = ev.tick;
+                });
+
+                // End of track meta event
+                trackBytes.push(0x00, 0xFF, 0x2F, 0x00);
+
+                // Append track block header to master byte payload
+                bytes.push(0x4D, 0x54, 0x72, 0x6B); // "MTrk"
+                const len = trackBytes.length;
+                
+                // Explicitly push 4-byte chunk size
+                bytes.push((len >> 24) & 0xFF, (len >> 16) & 0xFF, (len >> 8) & 0xFF, len & 0xFF);
+                
+                // Concatenate the actual data payload
+                for (let b = 0; b < trackBytes.length; b++) {
+                    bytes.push(trackBytes[b]);
+                }
+            });
+
+            // Trigger actual download bundle
+            const byteArray = new Uint8Array(bytes);
+            const blob = new Blob([byteArray], { type: "audio/midi" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = "Consolidated_Tracks.mid";
+            a.click();
+            URL.revokeObjectURL(url);
+        });
+    </script>
+</body>
+</html>
